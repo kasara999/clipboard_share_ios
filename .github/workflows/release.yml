@@ -40,10 +40,9 @@ jobs:
           name: android-apk
           path: ClipSync-Android.apk
 
-  # iOS: 署名用シークレットがある場合のみ IPA をビルド（TestFlight アップロード用）
-  # 友人への配布は TestFlight を使う（.ipa を GitHub から直接インストールは不可）
+  # iOS IPA は BUILD_IOS_IPA=true かつ署名シークレット設定時のみ（TestFlight アップロード用）
   build-ios:
-    if: ${{ secrets.IOS_CERTIFICATE_BASE64 != '' && secrets.IOS_PROVISIONING_PROFILE_BASE64 != '' }}
+    if: ${{ vars.BUILD_IOS_IPA == 'true' }}
     runs-on: macos-latest
     steps:
       - name: Checkout
