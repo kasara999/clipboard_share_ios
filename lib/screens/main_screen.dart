@@ -1,9 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
+import '../constants/platform_labels.dart';
 import '../services/clipboard_service.dart';
 import '../services/websocket_client.dart';
 import 'scanner_screen.dart';
@@ -13,7 +14,8 @@ enum _Source { local, remote }
 class _HistoryEntry {
   final ClipboardItem item;
   final _Source source;
-  _HistoryEntry(this.item, this.source);
+  final String? remoteLabel;
+  _HistoryEntry(this.item, this.source, {this.remoteLabel});
 }
 
 class MainScreen extends StatefulWidget {
@@ -70,24 +72,62 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     }));
 
     _subs.add(_client.messageStream.listen((msg) async {
-      await _clipService.applyRemote(msg);
       _addRemoteToHistory(msg);
     }));
 
     _subs.add(_clipService.itemStream.listen((item) {
-      _addEntry(_HistoryEntry(item, _Source.local));
-      _sendToServer(item);
+      _onLocalClipboard(item);
     }));
   }
 
+  String _remotePlatformLabel([Map<String, dynamic>? message]) {
+    final platform = message?['origin'] as String? ?? _client.serverPlatform;
+    return PlatformLabels.desktop(platform);
+  }
+
+  String get _localMobileLabel => PlatformLabels.localMobile();
+
+  bool _sameClipboardContent(ClipboardItem a, ClipboardItem b) {
+    if (a.type != b.type) return false;
+    if (a.type == ClipboardItemType.text) {
+      return a.text == b.text;
+    }
+    final aBytes = a.imageBytes;
+    final bBytes = b.imageBytes;
+    if (aBytes == null || bBytes == null) return false;
+    if (aBytes.length != bBytes.length) return false;
+    final n = aBytes.length.clamp(0, 64);
+    for (var i = 0; i < n; i++) {
+      if (aBytes[i] != bBytes[i]) return false;
+    }
+    return true;
+  }
+
+  void _onLocalClipboard(ClipboardItem item) {
+    if (_history.isNotEmpty &&
+        _history.first.source == _Source.remote &&
+        _sameClipboardContent(_history.first.item, item)) {
+      return;
+    }
+    _addEntry(_HistoryEntry(item, _Source.local));
+    _sendToServer(item);
+  }
+
   void _sendToServer(ClipboardItem item) {
+    final origin = Platform.operatingSystem;
     if (item.type == ClipboardItemType.text && item.text != null) {
-      _client.send({'type': 'clipboard', 'content_type': 'text', 'content': item.text});
+      _client.send({
+        'type': 'clipboard',
+        'content_type': 'text',
+        'content': item.text,
+        'origin': origin,
+      });
     } else if (item.type == ClipboardItemType.image && item.imageBytes != null) {
       _client.send({
         'type': 'clipboard',
         'content_type': 'image',
         'content': base64Encode(item.imageBytes!),
+        'origin': origin,
       });
     }
   }
@@ -100,7 +140,19 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     } else if (type == 'image') {
       item = ClipboardItem.image(base64Decode(msg['content'] as String));
     }
-    if (item != null) _addEntry(_HistoryEntry(item, _Source.remote));
+    if (item == null) return;
+    final remoteItem = item;
+
+    _clipService.noteRemoteContent(remoteItem);
+    final label = _remotePlatformLabel(msg);
+
+    if (_history.isNotEmpty &&
+        _history.first.source == _Source.local &&
+        _sameClipboardContent(_history.first.item, remoteItem)) {
+      setState(() => _history[0] = _HistoryEntry(remoteItem, _Source.remote, remoteLabel: label));
+      return;
+    }
+    _addEntry(_HistoryEntry(remoteItem, _Source.remote, remoteLabel: label));
   }
 
   void _addEntry(_HistoryEntry e) {
@@ -126,7 +178,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
   Future<void> _copyItem(ClipboardItem item) async {
     if (item.type == ClipboardItemType.text && item.text != null) {
-      await Clipboard.setData(ClipboardData(text: item.text!));
+      await _clipService.applyRemote({
+        'content_type': 'text',
+        'content': item.text,
+      });
     } else if (item.type == ClipboardItemType.image && item.imageBytes != null) {
       await _clipService.applyRemote({
         'content_type': 'image',
@@ -143,7 +198,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    for (final s in _subs) s.cancel();
+    for (final s in _subs) {
+      s.cancel();
+    }
     _client.dispose();
     _clipService.dispose();
     super.dispose();
@@ -218,6 +275,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 child: Text(
                   statusText,
                   style: TextStyle(color: statusColor, fontWeight: FontWeight.w500),
+                  maxLines: 3,
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
@@ -289,7 +347,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         borderRadius: BorderRadius.circular(4),
       ),
       child: Text(
-        isRemote ? 'Windows' : 'iPhone',
+        isRemote ? (entry.remoteLabel ?? _remotePlatformLabel()) : _localMobileLabel,
         style: TextStyle(
           fontSize: 10,
           color: isRemote ? Colors.blue[700] : Colors.green[700],

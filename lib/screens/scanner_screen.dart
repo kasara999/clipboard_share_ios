@@ -16,10 +16,25 @@ ConnectionInfo? parseQrData(String raw) {
     final port = uri.port > 0 ? uri.port : 8765;
     final token = uri.queryParameters['token'];
     if (ip.isEmpty || token == null || token.isEmpty) return null;
+    if (!_isValidLanIp(ip)) return null;
     return ConnectionInfo(ip: ip, port: port, token: token);
   } catch (_) {
     return null;
   }
+}
+
+bool _isValidLanIp(String ip) {
+  if (ip == '0.0.0.0' || ip == '127.0.0.1') return false;
+  final parts = ip.split('.');
+  if (parts.length != 4) return false;
+  final nums = parts.map(int.tryParse).toList();
+  if (nums.any((n) => n == null)) return false;
+  final a = nums[0]!;
+  final b = nums[1]!;
+  if (a == 10) return true;
+  if (a == 172 && b >= 16 && b <= 31) return true;
+  if (a == 192 && b == 168) return true;
+  return false;
 }
 
 /// QRコードスキャン画面。手動入力タブも備える。
@@ -65,7 +80,10 @@ class _ScannerScreenState extends State<ScannerScreen>
     final info = parseQrData(raw);
     if (info == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('QRコードの形式が正しくありません'), backgroundColor: Colors.red),
+        const SnackBar(
+          content: Text('QRコードの形式が正しくないか、IPアドレスが無効です'),
+          backgroundColor: Colors.red,
+        ),
       );
       Future.delayed(const Duration(seconds: 2), () => _scanned = false);
       return;
@@ -134,7 +152,7 @@ class _ScannerScreenState extends State<ScannerScreen>
           left: 0,
           right: 0,
           child: Text(
-            'WindowsアプリのQRコードを枠内に合わせてください',
+            'PCアプリのQRコードを枠内に合わせてください',
             textAlign: TextAlign.center,
             style: TextStyle(color: Colors.white, fontSize: 13, shadows: [
               Shadow(blurRadius: 4, color: Colors.black),
@@ -153,7 +171,7 @@ class _ScannerScreenState extends State<ScannerScreen>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text('WindowsアプリのQR画面に表示された情報を入力してください。',
+            const Text('PCアプリのQR画面に表示された情報を入力してください。',
                 style: TextStyle(color: Colors.grey, fontSize: 13)),
             const SizedBox(height: 24),
             TextFormField(

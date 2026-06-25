@@ -1,0 +1,140 @@
+# v* タグをプッシュすると Android APK（+ 署名設定済みなら iOS IPA）を GitHub Release に公開する
+
+name: Build and Release Mobile
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build Android APK
+        run: flutter build apk --release
+
+      - name: Rename APK
+        run: cp build/app/outputs/flutter-apk/app-release.apk ClipSync-Android.apk
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: ClipSync-Android.apk
+
+  # iOS: 署名用シークレットがある場合のみ IPA をビルド（TestFlight アップロード用）
+  # 友人への配布は TestFlight を使う（.ipa を GitHub から直接インストールは不可）
+  build-ios:
+    if: ${{ secrets.IOS_CERTIFICATE_BASE64 != '' && secrets.IOS_PROVISIONING_PROFILE_BASE64 != '' }}
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Install Apple certificate
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          p12-password: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+
+      - name: Install provisioning profile
+        run: |
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
+          cp "$RUNNER_TEMP/profile.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/"
+
+      - name: Build iOS IPA
+        run: flutter build ipa --release --export-options-plist=ios/ExportOptions.plist
+
+      - name: Copy IPA
+        run: cp build/ios/ipa/*.ipa ClipSync-iOS.ipa
+
+      - name: Upload iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: ClipSync-iOS.ipa
+
+  release:
+    needs: [build-android, build-ios]
+    if: ${{ always() && needs.build-android.result == 'success' && (needs.build-ios.result == 'success' || needs.build-ios.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Android artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: artifacts
+
+      - name: Download iOS artifact
+        if: ${{ needs.build-ios.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-ipa
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/ClipSync-Android.apk
+            artifacts/ClipSync-iOS.ipa
+          fail_on_unmatched_files: false
+          name: ClipSync Mobile ${{ github.ref_name }}
+          body: |
+            ## ダウンロード（スマホ版）
+
+            | ファイル | 対象 | インストール方法 |
+            |---------|------|----------------|
+            | `ClipSync-Android.apk` | Android | APK をダウンロードしてインストール（提供元不明のアプリを許可） |
+            | `ClipSync-iOS.ipa` | 開発者向け | App Store Connect / TestFlight へアップロード用（**友人は TestFlight を使う**） |
+
+            ## iPhone を友人に配るには
+
+            GitHub の `.ipa` は iPhone に直接インストールできません（Apple の制限）。
+            友人には **TestFlight** を案内してください:
+
+            https://testflight.apple.com/join/1mxzWq51
+
+            IPA をビルドする CI を使う場合は、リポジトリの Secrets に以下を設定:
+            - `IOS_CERTIFICATE_BASE64`（.p12 を base64 化）
+            - `IOS_CERTIFICATE_PASSWORD`
+            - `IOS_PROVISIONING_PROFILE_BASE64`（App Store 用プロファイル）
+
+            ## PC サーバー版
+
+            Windows / Mac 版は別リポジトリ:
+            https://github.com/kasara999/clipboard_share/releases/latest
+
+            ## 使い方
+
+            1. PC で ClipSync を起動 →「QR表示」
+            2. スマホで QR をスキャン（同じ Wi-Fi 必須）

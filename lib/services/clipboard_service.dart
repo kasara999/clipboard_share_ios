@@ -2,8 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:flutter/services.dart';
-import 'package:pasteboard/pasteboard.dart';
+import 'clipboard_events.dart';
+import 'native_pasteboard_service.dart';
 
 enum ClipboardItemType { text, image }
 
@@ -24,13 +24,14 @@ class ClipboardItem {
         timestamp = DateTime.now();
 }
 
-/// iOS クリップボード監視。
-/// iOS はフォアグラウンド時のみ読み取り可能なため、
+/// モバイル（iOS / Android）クリップボード監視。
+/// ネイティブのクリップボード変化イベントで検知する。
+/// フォアグラウンド時のみ読み取り可能なため、
 /// WidgetsBindingObserver と連携して外側から start/stop を呼ぶこと。
 class ClipboardService {
-  static const Duration _pollInterval = Duration(milliseconds: 500);
+  final _pasteboard = NativePasteboardService();
 
-  Timer? _timer;
+  StreamSubscription<void>? _clipboardSub;
   String? _lastText;
   String? _lastImageHash;
   bool _ignoreNext = false;
@@ -39,56 +40,71 @@ class ClipboardService {
   Stream<ClipboardItem> get itemStream => _itemController.stream;
 
   void startPolling() {
-    _timer ??= Timer.periodic(_pollInterval, (_) => _poll());
+    if (_clipboardSub != null) return;
+    _clipboardSub = ClipboardEvents.changes.listen(
+      (_) => unawaited(_readClipboard()),
+    );
   }
 
   void stopPolling() {
-    _timer?.cancel();
-    _timer = null;
+    unawaited(_clipboardSub?.cancel());
+    _clipboardSub = null;
   }
 
-  Future<void> _poll() async {
+  Future<void> _readClipboard() async {
     if (_ignoreNext) {
       _ignoreNext = false;
       return;
     }
 
-    // テキスト確認
-    final data = await Clipboard.getData(Clipboard.kTextPlain);
-    final text = data?.text;
-    if (text != null && text.isNotEmpty && text != _lastText) {
-      _lastText = text;
-      _itemController.add(ClipboardItem.text(text));
-      return;
+    if (await _pasteboard.getHasStrings()) {
+      final text = await _pasteboard.getText();
+      if (text != null && text.isNotEmpty && text != _lastText) {
+        _lastText = text;
+        _itemController.add(ClipboardItem.text(text));
+        return;
+      }
     }
 
-    // 画像確認
-    try {
-      final bytes = await Pasteboard.image;
-      if (bytes != null) {
-        final hash = base64Encode(bytes.sublist(0, bytes.length.clamp(0, 64)));
-        if (hash != _lastImageHash) {
-          _lastImageHash = hash;
-          _itemController.add(ClipboardItem.image(bytes));
+    if (await _pasteboard.getHasImages()) {
+      try {
+        final bytes = await _pasteboard.getImagePng();
+        if (bytes != null) {
+          final hash = base64Encode(bytes.sublist(0, bytes.length.clamp(0, 64)));
+          if (hash != _lastImageHash) {
+            _lastImageHash = hash;
+            _itemController.add(ClipboardItem.image(bytes));
+          }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
   }
 
-  /// リモートから受け取った内容をローカルに書き込む
+  /// リモート受信直後に OS クリップボード連携で同じ内容がローカルとして
+  /// 検知されるのを防ぐ。
+  void noteRemoteContent(ClipboardItem item) {
+    if (item.type == ClipboardItemType.text) {
+      _lastText = item.text;
+    } else if (item.imageBytes != null) {
+      _lastImageHash =
+          base64Encode(item.imageBytes!.sublist(0, item.imageBytes!.length.clamp(0, 64)));
+    }
+  }
+
+  /// リモートまたはアプリ内操作でクリップボードに書き込む
   Future<void> applyRemote(Map<String, dynamic> message) async {
     _ignoreNext = true;
     final type = message['content_type'] as String?;
     if (type == 'text') {
       final text = message['content'] as String?;
       if (text != null) {
-        await Clipboard.setData(ClipboardData(text: text));
+        await _pasteboard.setText(text);
         _lastText = text;
       }
     } else if (type == 'image') {
       final b64 = message['content'] as String?;
       if (b64 != null) {
-        await Pasteboard.writeImage(base64Decode(b64));
+        await _pasteboard.setImage(base64Decode(b64));
         _lastImageHash = b64.substring(0, b64.length.clamp(0, 64));
       }
     }
