@@ -1,43 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
-class ConnectionInfo {
-  final String ip;
-  final int port;
-  final String token;
-  const ConnectionInfo({required this.ip, required this.port, required this.token});
-}
+import '../models/ble_connection_result.dart';
+import '../models/connection_info.dart';
+import '../services/ble_client_service.dart';
 
-ConnectionInfo? parseQrData(String raw) {
-  try {
-    final uri = Uri.parse(raw);
-    if (uri.scheme != 'clipsync') return null;
-    final ip = uri.host;
-    final port = uri.port > 0 ? uri.port : 8765;
-    final token = uri.queryParameters['token'];
-    if (ip.isEmpty || token == null || token.isEmpty) return null;
-    if (!_isValidLanIp(ip)) return null;
-    return ConnectionInfo(ip: ip, port: port, token: token);
-  } catch (_) {
-    return null;
-  }
-}
+export '../models/ble_connection_result.dart';
+export '../models/connection_info.dart';
 
-bool _isValidLanIp(String ip) {
-  if (ip == '0.0.0.0' || ip == '127.0.0.1') return false;
-  final parts = ip.split('.');
-  if (parts.length != 4) return false;
-  final nums = parts.map(int.tryParse).toList();
-  if (nums.any((n) => n == null)) return false;
-  final a = nums[0]!;
-  final b = nums[1]!;
-  if (a == 10) return true;
-  if (a == 172 && b >= 16 && b <= 31) return true;
-  if (a == 192 && b == 168) return true;
-  return false;
-}
-
-/// QRコードスキャン画面。手動入力タブも備える。
+/// QR / 手動入力 / Bluetooth スキャン画面。
 class ScannerScreen extends StatefulWidget {
   const ScannerScreen({super.key});
 
@@ -48,10 +21,16 @@ class ScannerScreen extends StatefulWidget {
 class _ScannerScreenState extends State<ScannerScreen>
     with SingleTickerProviderStateMixin {
   late final TabController _tabController;
+  final _ble = BleClientService();
+
   bool _scanned = false;
   final _controller = MobileScannerController();
+  StreamSubscription<List<DiscoveredPc>>? _bleSub;
+  List<DiscoveredPc> _bleDevices = [];
+  bool _bleScanning = false;
+  String? _bleError;
+  String? _connectingId;
 
-  // 手動入力フォーム
   final _ipCtrl = TextEditingController();
   final _portCtrl = TextEditingController(text: '8765');
   final _tokenCtrl = TextEditingController();
@@ -60,16 +39,50 @@ class _ScannerScreenState extends State<ScannerScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    _tabController = TabController(length: 3, vsync: this);
+    _tabController.addListener(_onTabChanged);
+    _bleSub = _ble.discoveriesStream.listen((devices) {
+      if (!mounted) return;
+      setState(() => _bleDevices = devices);
+    });
+    _startBleScan();
+  }
+
+  void _onTabChanged() {
+    if (_tabController.index == 0 && !_bleScanning) {
+      unawaited(_startBleScan());
+    } else if (_tabController.index != 0 && _bleScanning) {
+      unawaited(_ble.stopDiscovery());
+      setState(() => _bleScanning = false);
+    }
+  }
+
+  Future<void> _startBleScan() async {
+    setState(() {
+      _bleError = null;
+      _bleScanning = true;
+    });
+    try {
+      await _ble.startDiscovery();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _bleError = 'Bluetooth を開始できません: $e';
+        _bleScanning = false;
+      });
+    }
   }
 
   @override
   void dispose() {
+    _tabController.removeListener(_onTabChanged);
     _tabController.dispose();
     _controller.dispose();
     _ipCtrl.dispose();
     _portCtrl.dispose();
     _tokenCtrl.dispose();
+    _bleSub?.cancel();
+    _ble.dispose();
     super.dispose();
   }
 
@@ -102,6 +115,36 @@ class _ScannerScreenState extends State<ScannerScreen>
     Navigator.of(context).pop(info);
   }
 
+  Future<void> _connectBle(DiscoveredPc pc) async {
+    final id = pc.peripheral.uuid.toString();
+    setState(() {
+      _connectingId = id;
+      _bleError = null;
+    });
+    try {
+      final token = await _ble.readDeviceToken(pc.peripheral);
+      if (!mounted) return;
+      if (token == null || token.isEmpty) {
+        setState(() => _bleError = 'PC からトークンを取得できませんでした');
+        return;
+      }
+      await _ble.stopDiscovery();
+      if (!mounted) return;
+      Navigator.of(context).pop(
+        BleConnectionResult(
+          peripheral: pc.peripheral,
+          token: token,
+          displayName: pc.displayName,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _bleError = '接続準備に失敗しました: $e');
+    } finally {
+      if (mounted) setState(() => _connectingId = null);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -110,6 +153,7 @@ class _ScannerScreenState extends State<ScannerScreen>
         bottom: TabBar(
           controller: _tabController,
           tabs: const [
+            Tab(icon: Icon(Icons.bluetooth), text: 'Bluetooth'),
             Tab(icon: Icon(Icons.qr_code_scanner), text: 'QRスキャン'),
             Tab(icon: Icon(Icons.keyboard), text: '手動入力'),
           ],
@@ -118,10 +162,83 @@ class _ScannerScreenState extends State<ScannerScreen>
       body: TabBarView(
         controller: _tabController,
         children: [
+          _buildBluetoothTab(),
           _buildScanTab(),
           _buildManualTab(),
         ],
       ),
+    );
+  }
+
+  Widget _buildBluetoothTab() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: Text(
+            'PC の ClipSync を起動し、Bluetooth 待ち受け中にしてください。\n'
+            '同じマンション Wi-Fi でも Bluetooth なら接続できます。',
+            style: TextStyle(fontSize: 13, color: Colors.grey[700]),
+          ),
+        ),
+        if (_bleError != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Text(_bleError!, style: const TextStyle(color: Colors.red, fontSize: 12)),
+          ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Row(
+            children: [
+              if (_bleScanning)
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              else
+                const Icon(Icons.bluetooth_searching, size: 18),
+              const SizedBox(width: 8),
+              Text(_bleScanning ? 'PC を検索中...' : 'スキャン停止中'),
+              const Spacer(),
+              TextButton.icon(
+                onPressed: _bleScanning ? null : _startBleScan,
+                icon: const Icon(Icons.refresh, size: 16),
+                label: const Text('再スキャン'),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: _bleDevices.isEmpty
+              ? const Center(
+                  child: Text('ClipSync が見つかりません', style: TextStyle(color: Colors.grey)),
+                )
+              : ListView.separated(
+                  itemCount: _bleDevices.length,
+                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  itemBuilder: (_, i) {
+                    final pc = _bleDevices[i];
+                    final id = pc.peripheral.uuid.toString();
+                    final connecting = _connectingId == id;
+                    return ListTile(
+                      leading: const Icon(Icons.computer),
+                      title: Text(pc.displayName),
+                      subtitle: Text('信号強度: ${pc.rssi} dBm'),
+                      trailing: connecting
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.chevron_right),
+                      onTap: connecting ? null : () => _connectBle(pc),
+                    );
+                  },
+                ),
+        ),
+      ],
     );
   }
 
@@ -171,8 +288,10 @@ class _ScannerScreenState extends State<ScannerScreen>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text('PCアプリのQR画面に表示された情報を入力してください。',
-                style: TextStyle(color: Colors.grey, fontSize: 13)),
+            const Text(
+              'PCアプリのQR画面に表示された情報を入力してください。',
+              style: TextStyle(color: Colors.grey, fontSize: 13),
+            ),
             const SizedBox(height: 24),
             TextFormField(
               controller: _ipCtrl,

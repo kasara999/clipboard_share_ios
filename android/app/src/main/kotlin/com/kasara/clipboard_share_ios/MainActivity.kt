@@ -3,6 +3,7 @@ package com.kasara.clipboard_share_ios
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -59,6 +60,25 @@ class MainActivity : FlutterActivity() {
                 result.success(null)
             } else {
                 result.notImplemented()
+            }
+        }
+
+        MethodChannel(messenger, "clipsync/background").setMethodCallHandler { call, result ->
+            when (call.method) {
+                "start" -> {
+                    val intent = Intent(this, ClipSyncForegroundService::class.java)
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                        startForegroundService(intent)
+                    } else {
+                        startService(intent)
+                    }
+                    result.success(null)
+                }
+                "stop" -> {
+                    stopService(Intent(this, ClipSyncForegroundService::class.java))
+                    result.success(null)
+                }
+                else -> result.notImplemented()
             }
         }
 

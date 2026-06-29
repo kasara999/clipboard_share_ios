@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../constants/platform_labels.dart';
 import '../services/clipboard_service.dart';
+import '../services/connection_session_service.dart';
 import '../services/websocket_client.dart';
 import 'scanner_screen.dart';
 
@@ -26,10 +27,11 @@ class MainScreen extends StatefulWidget {
 }
 
 class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
-  final _client = WebSocketClient();
+  final _session = ConnectionSessionService();
   final _clipService = ClipboardService();
 
   ConnectionInfo? _connInfo;
+  BleConnectionResult? _bleInfo;
   ClientState _connState = ClientState.disconnected;
   String? _connError;
 
@@ -45,33 +47,39 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
+    final inForeground = state == AppLifecycleState.resumed;
+    _session.onAppLifecycle(inForeground);
+    if (inForeground) {
       _clipService.startPolling();
+      unawaited(_clipService.checkOnResume());
     } else {
       _clipService.stopPolling();
     }
   }
 
   void _setupStreams() {
-    _subs.add(_client.stateStream.listen((s) {
+    _subs.add(_session.stateStream.listen((s) {
       setState(() {
         _connState = s;
         if (s == ClientState.error) {
-          _connError = _client.lastError;
+          _connError = _session.lastError;
         } else {
           _connError = null;
         }
       });
 
-      // 接続確立時にクリップボード監視を開始
       if (s == ClientState.connected) {
         _clipService.startPolling();
-      } else if (s == ClientState.disconnected || s == ClientState.error) {
+      } else if (s == ClientState.disconnected) {
         _clipService.stopPolling();
+        _session.onUnexpectedDisconnect();
+      } else if (s == ClientState.error) {
+        _clipService.stopPolling();
+        _session.onUnexpectedDisconnect();
       }
     }));
 
-    _subs.add(_client.messageStream.listen((msg) async {
+    _subs.add(_session.messageStream.listen((msg) async {
       _addRemoteToHistory(msg);
     }));
 
@@ -81,7 +89,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 
   String _remotePlatformLabel([Map<String, dynamic>? message]) {
-    final platform = message?['origin'] as String? ?? _client.serverPlatform;
+    final platform = message?['origin'] as String? ?? _session.serverPlatform;
     return PlatformLabels.desktop(platform);
   }
 
@@ -116,14 +124,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   void _sendToServer(ClipboardItem item) {
     final origin = Platform.operatingSystem;
     if (item.type == ClipboardItemType.text && item.text != null) {
-      _client.send({
+      _session.send({
         'type': 'clipboard',
         'content_type': 'text',
         'content': item.text,
         'origin': origin,
       });
     } else if (item.type == ClipboardItemType.image && item.imageBytes != null) {
-      _client.send({
+      _session.send({
         'type': 'clipboard',
         'content_type': 'image',
         'content': base64Encode(item.imageBytes!),
@@ -163,17 +171,31 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _startScan() async {
-    final info = await Navigator.of(context).push<ConnectionInfo>(
+    final result = await Navigator.of(context).push<Object?>(
       MaterialPageRoute(builder: (_) => const ScannerScreen()),
     );
-    if (info == null) return;
-    setState(() => _connInfo = info);
-    await _client.connect(info.ip, info.port, info.token);
+    if (result == null) return;
+    if (result is ConnectionInfo) {
+      setState(() {
+        _connInfo = result;
+        _bleInfo = null;
+      });
+      await _session.connectLan(result);
+    } else if (result is BleConnectionResult) {
+      setState(() {
+        _bleInfo = result;
+        _connInfo = null;
+      });
+      await _session.connectBle(result);
+    }
   }
 
   Future<void> _disconnect() async {
-    await _client.disconnect();
-    setState(() => _connInfo = null);
+    await _session.disconnect();
+    setState(() {
+      _connInfo = null;
+      _bleInfo = null;
+    });
   }
 
   Future<void> _copyItem(ClipboardItem item) async {
@@ -201,7 +223,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     for (final s in _subs) {
       s.cancel();
     }
-    _client.dispose();
+    _session.dispose();
     _clipService.dispose();
     super.dispose();
   }
@@ -242,12 +264,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     switch (_connState) {
       case ClientState.connected:
         statusColor = Colors.green;
-        statusIcon = Icons.wifi;
-        statusText = '接続中: ${_connInfo?.ip}:${_connInfo?.port}';
+        statusIcon = _bleInfo != null ? Icons.bluetooth_connected : Icons.wifi;
+        statusText = _bleInfo != null
+            ? 'Bluetooth 接続中: ${_bleInfo!.displayName}'
+            : '接続中: ${_connInfo?.ip}:${_connInfo?.port}';
       case ClientState.connecting:
         statusColor = Colors.orange;
         statusIcon = Icons.wifi_find;
-        statusText = '接続中...';
+        statusText = _session.savedInfo != null ? '再接続中...' : '接続中...';
       case ClientState.authenticating:
         statusColor = Colors.orange;
         statusIcon = Icons.lock_open;
@@ -285,8 +309,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           const SizedBox(height: 12),
           if (!isConnected && !isLoading)
             FilledButton.icon(
-              icon: const Icon(Icons.qr_code_scanner),
-              label: const Text('QRコードをスキャンして接続'),
+              icon: const Icon(Icons.link),
+              label: const Text('PC に接続'),
               onPressed: _startScan,
             )
           else if (isConnected)

@@ -34,6 +34,7 @@ private func isLocalNetworkDeniedError(_ error: NWError) -> Bool {
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private var networkPrepConnection: NWConnection?
+  private var backgroundTaskId: UIBackgroundTaskIdentifier = .invalid
   private let clipboardEventsHandler = ClipboardEventsHandler()
 
   override func application(
@@ -100,6 +101,20 @@ private func isLocalNetworkDeniedError(_ error: NWError) -> Bool {
       self?.prepareLocalNetwork(host: host, port: nwPort, result: result)
     }
 
+    let backgroundChannel = FlutterMethodChannel(name: "clipsync/background", binaryMessenger: messenger)
+    backgroundChannel.setMethodCallHandler { [weak self] call, result in
+      switch call.method {
+      case "start":
+        self?.beginBackgroundKeepAlive()
+        result(nil)
+      case "stop":
+        self?.endBackgroundKeepAlive()
+        result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
     let clipboardEvents = FlutterEventChannel(
       name: "clipsync/clipboard_events",
       binaryMessenger: messenger
@@ -109,6 +124,7 @@ private func isLocalNetworkDeniedError(_ error: NWError) -> Bool {
 
   private func prepareLocalNetwork(host: String, port: NWEndpoint.Port, result: @escaping FlutterResult) {
     networkPrepConnection?.cancel()
+    networkPrepConnection = nil
 
     let connection = NWConnection(
       host: NWEndpoint.Host(host),
@@ -118,21 +134,30 @@ private func isLocalNetworkDeniedError(_ error: NWError) -> Bool {
     networkPrepConnection = connection
 
     var finished = false
-    func finish(_ callback: () -> Void) {
+    var timeout: DispatchWorkItem!
+    func finish(_ respond: () -> Any?) {
       guard !finished else { return }
       finished = true
+      timeout.cancel()
       connection.cancel()
-      networkPrepConnection = nil
-      callback()
+      if networkPrepConnection === connection {
+        networkPrepConnection = nil
+      }
+      let value = respond()
+      if let error = value as? FlutterError {
+        result(error)
+      } else {
+        result(nil)
+      }
     }
 
-    let timeout = DispatchWorkItem {
+    timeout = DispatchWorkItem {
       finish {
-        result(FlutterError(
+        FlutterError(
           code: "timeout",
           message: "ネットワークの準備がタイムアウトしました",
           details: nil
-        ))
+        )
       }
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: timeout)
@@ -140,42 +165,61 @@ private func isLocalNetworkDeniedError(_ error: NWError) -> Bool {
     connection.stateUpdateHandler = { state in
       switch state {
       case .ready:
-        timeout.cancel()
-        finish { result(nil) }
+        finish { nil }
       case .waiting(let error):
         if isLocalNetworkDeniedError(error) {
-          timeout.cancel()
           finish {
-            result(FlutterError(
+            FlutterError(
               code: "local_network_denied",
               message: "ローカルネットワークへのアクセスが拒否されています",
               details: nil
-            ))
+            )
           }
         }
       case .failed(let error):
-        timeout.cancel()
         if case NWError.posix(let code) = error, code == POSIXErrorCode.ECONNREFUSED {
           // 到達はできたがサーバー未起動 — 許可ダイアログは通過済みのはず
-          finish { result(nil) }
+          finish { nil }
         } else if case NWError.posix(let code) = error, code == POSIXErrorCode.ENETUNREACH {
           finish {
-            result(FlutterError(
+            FlutterError(
               code: "unreachable",
               message: "PCに到達できません",
               details: nil
-            ))
+            )
           }
         } else {
-          finish { result(nil) }
+          finish { nil }
         }
       case .cancelled:
-        break
+        // 新しい接続準備で cancel された場合も Dart 側に必ず応答する
+        if !finished {
+          finish {
+            FlutterError(
+              code: "cancelled",
+              message: "ネットワークの準備が中断されました",
+              details: nil
+            )
+          }
+        }
       default:
         break
       }
     }
 
     connection.start(queue: .main)
+  }
+
+  private func beginBackgroundKeepAlive() {
+    if backgroundTaskId != .invalid { return }
+    backgroundTaskId = UIApplication.shared.beginBackgroundTask { [weak self] in
+      self?.endBackgroundKeepAlive()
+    }
+  }
+
+  private func endBackgroundKeepAlive() {
+    guard backgroundTaskId != .invalid else { return }
+    UIApplication.shared.endBackgroundTask(backgroundTaskId)
+    backgroundTaskId = .invalid
   }
 }

@@ -25,6 +25,9 @@ class LocalNetworkService {
       case 'timeout':
         return 'ネットワークの準備がタイムアウトしました。\n'
             '同じWi-Fiに接続されているか確認してください。';
+      case 'cancelled':
+        return 'ネットワークの準備が中断されました。\n'
+            'もう一度接続を試してください。';
       default:
         return e.message ?? 'ネットワークエラー (${e.code})';
     }

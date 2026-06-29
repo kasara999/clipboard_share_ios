@@ -25,9 +25,8 @@ class ClipboardItem {
 }
 
 /// モバイル（iOS / Android）クリップボード監視。
-/// ネイティブのクリップボード変化イベントで検知する。
-/// フォアグラウンド時のみ読み取り可能なため、
-/// WidgetsBindingObserver と連携して外側から start/stop を呼ぶこと。
+/// フォアグラウンド中は変化イベントで検知し、復帰時は [checkOnResume] で
+/// バックグラウンド中に他アプリでコピーされた内容を拾う。
 class ClipboardService {
   final _pasteboard = NativePasteboardService();
 
@@ -50,6 +49,9 @@ class ClipboardService {
     unawaited(_clipboardSub?.cancel());
     _clipboardSub = null;
   }
+
+  /// アプリ復帰時にクリップボードを1回読み、前回と違えば [itemStream] に流す。
+  Future<void> checkOnResume() => _readClipboard();
 
   Future<void> _readClipboard() async {
     if (_ignoreNext) {

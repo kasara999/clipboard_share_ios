@@ -26,6 +26,10 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>PC の ClipSync に Bluetooth で接続するために Bluetooth を使用します。</string>
+  <key>NSBluetoothPeripheralUsageDescription</key>
+  <string>PC の ClipSync に Bluetooth で接続するために Bluetooth を使用します。</string>
   <key>NSCameraUsageDescription</key>
   <string>QRコードをスキャンしてWindowsアプリに接続するためにカメラを使用します。</string>
   <key>NSLocalNetworkUsageDescription</key>

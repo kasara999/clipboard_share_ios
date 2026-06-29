@@ -44,11 +44,14 @@ class WebSocketClient {
     Completer<void>? authCompleter;
 
     try {
-      await _localNetwork.prepareAccess(host: ip, port: port);
+      await _localNetwork
+          .prepareAccess(host: ip, port: port)
+          .timeout(const Duration(seconds: 12));
 
       _channel = IOWebSocketChannel.connect(
         Uri.parse('ws://$ip:$port'),
         connectTimeout: const Duration(seconds: 10),
+        pingInterval: const Duration(seconds: 25),
       );
       await _channel!.ready.timeout(const Duration(seconds: 10));
 
@@ -172,8 +175,20 @@ class WebSocketClient {
       return 'PCのClipSyncに接続できません（$ip:$port）。\n'
           'PCアプリが起動しているか、ファイアウォールで許可されているか確認してください。';
     }
-    if (msg.contains('Network is unreachable') || msg.contains('ENETUNREACH')) {
-      return 'PCに到達できません。\niPhoneとPCが同じWi-Fiに接続されているか確認してください。';
+    if (msg.contains('No route to host') ||
+        msg.contains('EHOSTUNREACH') ||
+        msg.contains('Network is unreachable') ||
+        msg.contains('ENETUNREACH')) {
+      return 'PCに到達できません（$ip:$port）。\n'
+          '・スマホとPCが同じWi-Fiか（モバイルデータOFF）\n'
+          '・PCアプリに表示されたIPが ipconfig と一致するか\n'
+          '・Windowsファイアウォールで ClipSync を許可しているか\n'
+          '・ゲストWi-FiやVPNを使っていないか';
+    }
+    if (msg.contains('Future not completed') ||
+        msg.contains('future not complete')) {
+      return '接続処理が完了しませんでした。\n'
+          'もう一度 QR を読み直すか、アプリを再起動してください。';
     }
     return '接続に失敗しました: $msg';
   }
